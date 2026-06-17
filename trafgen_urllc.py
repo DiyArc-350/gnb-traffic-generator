@@ -119,6 +119,21 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
         except Exception:
             pass
 
+# ============================================================
+# ARGUMENT PARSER
+# ============================================================
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="URLLC WebSocket Traffic Generator & Performance Analyzer"
+    )
+    parser.add_argument("--host", "-H", default="10.40.1.220")
+    parser.add_argument("--port", "-p", default="80") # Routed directly via public Nginx Port 80
+    parser.add_argument("--endpoint", "-e", default="/stream/yolo") # Explicit route to NanoDet Node
+    parser.add_argument("--interface", "-i", default="oaitun_ue1")
+    parser.add_argument("--input", default="./input_video", help="Folder containing input videos")
+    parser.add_argument("--workers", "-w", type=int, default=1, help="Maximum concurrent streaming pipelines")
+    return parser.parse_args()
+
 
 # ============================================================
 # MAIN (Updated with 3rd Prompt)
