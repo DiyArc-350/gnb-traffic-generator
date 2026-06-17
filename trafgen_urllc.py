@@ -94,34 +94,45 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
             resized_frame = cv2.resize(frame, (160, 160), interpolation=cv2.INTER_AREA)
             
             # ==============================================================================
-            # ADAPTIVE COMPRESSION ENGINE: Target custom sizes with +/- 0.5 KB tolerance boundaries
+            # CONSTANT COMPRESSION ENGINE: Strict Upper Ceiling Limit
             # ==============================================================================
             if target_size_mode == "random":
                 chosen_kb = random.randint(1, 5)
             else:
                 chosen_kb = int(target_size_mode)
                 
-            target_min_bytes = (chosen_kb - 0.5) * 1024
-            target_max_bytes = (chosen_kb + 0.5) * 1024
+            # Convert chosen target strictly to bytes limit
+            strict_max_bytes = chosen_kb * 1024
             
-            jpeg_quality = 50  # Start balanced
             binary_bytes = b""
             byte_size = 0
             
-            # Loop dynamically adjusts quantization to force payload into targeted limits
-            for attempt in range(5):
-                _, encoded_img = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            # Binary search style search across JPEG quality matrix (1 to 100)
+            # to find the highest quality that stays underneath the strict byte limit.
+            low_q, high_q = 1, 100
+            best_quality = 50
+            
+            for attempt in range(6):  # 6 steps are mathematically enough to settle the quality factor
+                mid_q = (low_q + high_q) // 2
+                _, encoded_img = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
+                temp_bytes = encoded_img.tobytes()
+                temp_size = len(temp_bytes)
+                
+                if temp_size <= strict_max_bytes:
+                    # It fits! Save it as our best option so far and try to increase quality
+                    best_quality = mid_q
+                    binary_bytes = temp_bytes
+                    byte_size = temp_size
+                    low_q = mid_q + 1
+                else:
+                    # Too large! Lower the quality range window
+                    high_q = mid_q - 1
+            
+            # Fallback protection if even Quality=1 failed strict limit criteria
+            if not binary_bytes:
+                _, encoded_img = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
                 binary_bytes = encoded_img.tobytes()
                 byte_size = len(binary_bytes)
-                
-                if byte_size > target_max_bytes:
-                    jpeg_quality -= 15  # Compress harder
-                    jpeg_quality = max(5, jpeg_quality)
-                elif byte_size < target_min_bytes:
-                    jpeg_quality += 15  # Increase details slightly
-                    jpeg_quality = min(95, jpeg_quality)
-                else:
-                    break  # Success! Payload falls perfectly inside boundaries
             # ==============================================================================
             
             # Start high-precision timing round-trip loop
@@ -144,14 +155,13 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                 
             if data.get("status") == "success":
                 ai_ms = data.get("inference_time_ms", 0.0)
-                # Network transit includes upload, processing propagation, and metadata return delivery
                 network_transit_ms = max(0.0, rtt_ms - ai_ms)
                 detected = data.get("detected", [])
                 
                 log_entry = (
                     f"[{worker_id:03d}-F{frame_index:02d}] [OK] {filename[:12]:<12} | "
                     f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB) | "
-                    f"Target: {chosen_kb}KB | "
+                    f"Max Limit: {chosen_kb}KB | "
                     f"RTT: {rtt_ms:6.1f}ms | "
                     f"Server_AI: {ai_ms:5.1f}ms | "
                     f"Net_Transit: {network_transit_ms:6.1f}ms | "
@@ -162,7 +172,6 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                 with open(log_filename, "a") as f:
                     f.write(log_entry + "\n")
                     
-                # Update centralized metric accumulation variables safely
                 with stats_lock:
                     stats["total_rtt"] += rtt_ms
                     stats["total_ai_reported"] += ai_ms
@@ -204,8 +213,8 @@ def main():
         num_sessions = int(input("\nTotal stream sessions to run       : "))
         
         print("\nFrame Size Configurations:")
-        print("  - Choose fixed value: 1, 2, 3, 4, or 5 (in KB)")
-        print("  - Or type 'random' to fluctuate between 1KB-5KB per frame")
+        print("  - Choose a constant max value: 1, 2, 3, 4, or 5 (in KB)")
+        print("  - Or type 'random' to choose a new constant limit per frame")
         target_size_mode = input("Select Frame Size Mode             : ").strip().lower()
         
         if target_size_mode not in ["1", "2", "3", "4", "5", "random"]:
@@ -217,11 +226,9 @@ def main():
         print("ERROR: Invalid input configuration received.")
         return
 
-    # Formulate structural WebSocket uniform resource locator string
     ws_url = f"ws://{args.host}:{args.port}{args.endpoint}"
     print(f"Server WebSocket URL : {ws_url}")
 
-    # Inspect input videos path setup
     os.makedirs(args.input, exist_ok=True)
     video_extensions = (".mp4", ".avi", ".mov", ".mkv")
     videos = [
@@ -234,23 +241,19 @@ def main():
         print(f"ERROR: No source video files found inside target dir: {args.input}")
         return
 
-    # Setup log configuration block headers
     with open(log_filename, "w") as f:
         f.write(f"=== URLLC REAL-TIME NANODET WEBSOCKET TEST LOG ===\n")
         f.write(f"Timestamp   : {time.ctime()}\nServer      : {ws_url}\nInterface   : {args.interface}\n")
-        f.write(f"Size Mode   : {target_size_mode}\n\n")
+        f.write(f"Size Mode   : Strict Max Constant {target_size_mode} KB\n\n")
         f.write("-" * 130 + "\n")
 
-    # Patch socket routines to enforce specific hardware interface routes
     patch_socket_source_ip(source_ip)
 
-    # Initialize Thread Pool
     executor = ThreadPoolExecutor(max_workers=args.workers)
     print(f"\nSpawning {num_sessions} pipelines across {args.workers} workers...\n")
 
     start_sim = time.perf_counter()
 
-    # Distribute parallel tasks across active thread lines
     for i in range(1, num_sessions + 1):
         chosen_video = random.choice(videos)
         executor.submit(
@@ -266,7 +269,6 @@ def main():
     executor.shutdown(wait=True)
     end_sim = time.perf_counter()
 
-    # Display final aggregated statistical summary
     if stats["count"] > 0:
         avg_rtt = stats["total_rtt"] / stats["count"]
         avg_ai = stats["total_ai_reported"] / stats["count"]
