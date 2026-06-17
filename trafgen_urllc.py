@@ -1,71 +1,7 @@
-import os
-import time
-import logging
-import random
-import socket
-import struct
-import fcntl
-import argparse
-import threading
-from concurrent.futures import ThreadPoolExecutor
-import cv2
-import websocket  # pip install websocket-client
-
 # ============================================================
-# GLOBAL STATISTICS
+# STREAMING PIPELINE WORKER FUNCTION (Updated for Dynamic Sizes)
 # ============================================================
-stats_lock = threading.Lock()
-
-stats = {
-    "total_rtt": 0.0,
-    "total_ai_reported": 0.0,
-    "total_network_transit": 0.0,
-    "total_bytes_sent": 0.0,
-    "count": 0
-}
-
-# ============================================================
-# ARGUMENT PARSER
-# ============================================================
-def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="URLLC WebSocket Traffic Generator & Performance Analyzer"
-    )
-    parser.add_argument("--host", "-H", default="10.40.1.220")
-    parser.add_argument("--port", "-p", default="80") # Routed directly via public Nginx Port 80
-    parser.add_argument("--endpoint", "-e", default="/stream/yolo") # Explicit route to NanoDet Node
-    parser.add_argument("--interface", "-i", default="oaitun_ue1")
-    parser.add_argument("--input", default="./input_video", help="Folder containing input videos")
-    parser.add_argument("--workers", "-w", type=int, default=1, help="Maximum concurrent streaming pipelines")
-    return parser.parse_args()
-
-# ============================================================
-# GET INTERFACE IP
-# ============================================================
-def get_interface_ip(interface):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    return socket.inet_ntoa(
-        fcntl.ioctl(
-            s.fileno(),
-            0x8915,  # SIOCGIFADDR
-            struct.pack('256s', interface[:15].encode())
-        )[20:24]
-    )
-
-# ============================================================
-# CREATE SOURCE-BOUND CONNECTION
-# ============================================================
-def patch_socket_source_ip(source_ip):
-    """Forces WebSocket underlying connections to bind cleanly to the URLLC interface"""
-    original_create_connection = socket.create_connection
-    def bound_create_connection(address, timeout=socket.getdefaulttimeout(), source_address=None):
-        return original_create_connection(address, timeout, source_address=(source_ip, 0))
-    socket.create_connection = bound_create_connection
-
-# ============================================================
-# STREAMING PIPELINE WORKER FUNCTION
-# ============================================================
-def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frames=30):
+def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_size_mode, max_frames=30):
     filename = os.path.basename(video_path)
     cap = cv2.VideoCapture(video_path)
     
@@ -90,20 +26,28 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
                 
             frame_index += 1
             
-            # ==============================================================================
-            # ADAPTIVE COMPRESSION ENGINE: Target 1KB to 5KB Size Boundaries
-            # ==============================================================================
             # Step A: Downscale raw resolution matrix to save memory space baseline
             resized_frame = cv2.resize(frame, (160, 160), interpolation=cv2.INTER_AREA)
             
-            target_min_bytes = 1 * 1024  # 1 KB
-            target_max_bytes = 5 * 1024  # 5 KB
+            # ==============================================================================
+            # DYNAMIC COMPRESSION ENGINE: Configured via prompt
+            # ==============================================================================
+            if target_size_mode == "random":
+                # Pick a random integer target boundary between 1 KB and 5 KB for this specific frame
+                chosen_kb = random.randint(1, 5)
+                target_min_bytes = (chosen_kb - 0.5) * 1024
+                target_max_bytes = (chosen_kb + 0.5) * 1024
+            else:
+                # Use the fixed KB size selected by the user
+                chosen_kb = int(target_size_mode)
+                target_min_bytes = (chosen_kb - 0.5) * 1024
+                target_max_bytes = (chosen_kb + 0.5) * 1024
             
             jpeg_quality = 50  # Start balanced
             binary_bytes = b""
             byte_size = 0
             
-            # Loop dynamically adjusts quantization to force payload into 1KB-5KB limits
+            # Loop dynamically adjusts quantization to force payload into targeted limits
             for attempt in range(5):
                 _, encoded_img = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
                 binary_bytes = encoded_img.tobytes()
@@ -139,13 +83,13 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
                 
             if data.get("status") == "success":
                 ai_ms = data.get("inference_time_ms", 0.0)
-                # Network transit includes upload, processing propagation, and metadata return delivery
                 network_transit_ms = max(0.0, rtt_ms - ai_ms)
                 detected = data.get("detected", [])
                 
                 log_entry = (
                     f"[{worker_id:03d}-F{frame_index:02d}] [OK] {filename[:12]:<12} | "
                     f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB) | "
+                    f"Target: {chosen_kb}KB | "
                     f"RTT: {rtt_ms:6.1f}ms | "
                     f"Server_AI: {ai_ms:5.1f}ms | "
                     f"Net_Transit: {network_transit_ms:6.1f}ms | "
@@ -156,7 +100,6 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
                 with open(log_filename, "a") as f:
                     f.write(log_entry + "\n")
                     
-                # Update centralized metric accumulation variables safely
                 with stats_lock:
                     stats["total_rtt"] += rtt_ms
                     stats["total_ai_reported"] += ai_ms
@@ -176,14 +119,14 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
         except Exception:
             pass
 
+
 # ============================================================
-# MAIN
+# MAIN (Updated with 3rd Prompt)
 # ============================================================
 def main():
     args = parse_arguments()
     print("\n=== URLLC REAL-TIME WEBSOCKET TRAFFIC GENERATOR (NANODET) ===\n")
 
-    # Resolve interface IP
     try:
         source_ip = get_interface_ip(args.interface)
     except OSError:
@@ -193,18 +136,28 @@ def main():
     print(f"Binding to interface : {args.interface}")
     print(f"Source IP            : {source_ip}")
 
+    # --- THREE INTERACTIVE PROMPTS ---
     try:
-        num_sessions = int(input("\nTotal stream sessions to run : "))
-        log_filename = input("Log file name (.txt)         : ") or "nanodet_websocket_log.txt"
+        num_sessions = int(input("\nTotal stream sessions to run       : "))
+        
+        # New 3rd Prompt for customizing file size constraint boundaries
+        print("\nFrame Size Configurations:")
+        print("  - Choose fixed value: 1, 2, 3, 4, or 5 (in KB)")
+        print("  - Or type 'random' to fluctuate between 1KB-5KB per frame")
+        target_size_mode = input("Select Frame Size Mode             : ").strip().lower()
+        
+        if target_size_mode not in ["1", "2", "3", "4", "5", "random"]:
+            print("ERROR: Invalid selection. Choose 1-5 or 'random'.")
+            return
+
+        log_filename = input("\nLog file name (.txt)               : ") or "nanodet_websocket_log.txt"
     except ValueError:
-        print("ERROR: Invalid numeric input.")
+        print("ERROR: Invalid input configuration received.")
         return
 
-    # Formulate structural WebSocket uniform resource locator string
     ws_url = f"ws://{args.host}:{args.port}{args.endpoint}"
     print(f"Server WebSocket URL : {ws_url}")
 
-    # Inspect input videos path setup
     os.makedirs(args.input, exist_ok=True)
     video_extensions = (".mp4", ".avi", ".mov", ".mkv")
     videos = [
@@ -217,22 +170,19 @@ def main():
         print(f"ERROR: No source video files found inside target dir: {args.input}")
         return
 
-    # Setup log configuration block headers
     with open(log_filename, "w") as f:
         f.write(f"=== URLLC REAL-TIME NANODET WEBSOCKET TEST LOG ===\n")
-        f.write(f"Timestamp : {time.ctime()}\nServer    : {ws_url}\nInterface : {args.interface}\n\n")
-        f.write("-" * 120 + "\n")
+        f.write(f"Timestamp   : {time.ctime()}\nServer      : {ws_url}\nInterface   : {args.interface}\n")
+        f.write(f"Size Mode   : {target_size_mode} KB\n\n")
+        f.write("-" * 130 + "\n")
 
-    # Patch socket routines to enforce specific hardware interface routes
     patch_socket_source_ip(source_ip)
 
-    # Initialize Thread Pool
     executor = ThreadPoolExecutor(max_workers=args.workers)
     print(f"\nSpawning {num_sessions} pipelines across {args.workers} workers...\n")
 
     start_sim = time.perf_counter()
 
-    # Distribute parallel tasks across active thread lines
     for i in range(1, num_sessions + 1):
         chosen_video = random.choice(videos)
         executor.submit(
@@ -241,13 +191,13 @@ def main():
             chosen_video,
             ws_url,
             log_filename,
+            target_size_mode, # Passed down to worker compression loop
             max_frames=30
         )
 
     executor.shutdown(wait=True)
     end_sim = time.perf_counter()
 
-    # Display final aggregated statistical summary
     if stats["count"] > 0:
         avg_rtt = stats["total_rtt"] / stats["count"]
         avg_ai = stats["total_ai_reported"] / stats["count"]
