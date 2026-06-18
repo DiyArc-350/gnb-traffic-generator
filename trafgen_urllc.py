@@ -35,7 +35,7 @@ def parse_arguments():
     parser.add_argument("--port", "-p", default="80") # Routed directly via public Nginx Port 80
     parser.add_argument("--endpoint", "-e", default="/stream/yolo") # Explicit route to NanoDet Node
     parser.add_argument("--interface", "-i", default="oaitun_ue1")
-    parser.add_argument("--input", default="./input_video", help="Folder containing input videos")
+    parser.add_argument("--input", default="../input_video", help="Folder containing input videos")
     parser.add_argument("--workers", "-w", type=int, default=1, help="Maximum concurrent streaming pipelines")
     return parser.parse_args()
 
@@ -225,7 +225,13 @@ def main():
             print("ERROR: Invalid selection. Choose 1-5 or 'random'.")
             return
 
-        log_filename = input("\nLog file name (.txt)               : ") or "nanodet_websocket_log.txt"
+        log_input = input("\nLog file name (.txt)               : ") or "nanodet_websocket_log.txt"
+        # Define your target directory here (e.g., a folder named 'logs' in the current directory)
+        log_dir = "../logs" 
+        os.makedirs(log_dir, exist_ok=True) # Automatically creates the folder if it doesn't exist
+        
+        # Combine the directory and the filename safely
+        log_filename = os.path.join(log_dir, log_input)
     except ValueError:
         print("ERROR: Invalid input configuration received.")
         return
