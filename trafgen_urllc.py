@@ -277,7 +277,7 @@ def main():
             ws_url,
             log_filename,
             target_size_mode,
-            max_frames=None  
+            max_frames=100
         )
 
     executor.shutdown(wait=True)
