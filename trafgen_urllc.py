@@ -65,7 +65,7 @@ def patch_socket_source_ip(source_ip):
 # ============================================================
 # STREAMING PIPELINE WORKER FUNCTION
 # ============================================================
-def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_size_mode, max_frames=30):
+def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_size_mode, max_frames=None):
     filename = os.path.basename(video_path)
     cap = cv2.VideoCapture(video_path)
     
@@ -83,7 +83,11 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
     frame_index = 0
     
     try:
-        while cap.isOpened() and frame_index < max_frames:
+        while cap.isOpened():
+            # If max_frames is set and we've reached it, break out
+            if max_frames is not None and frame_index >= max_frames:
+                break
+
             success, frame = cap.read()
             if not success:
                 break
@@ -159,7 +163,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                 detected = data.get("detected", [])
                 
                 log_entry = (
-                    f"[{worker_id:03d}-F{frame_index:02d}] [OK] {filename[:12]:<12} | "
+                    f"[{worker_id:03d}-F{frame_index:04d}] [OK] {filename[:12]:<12} | "
                     f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB) | "
                     f"Max Limit: {chosen_kb}KB | "
                     f"RTT: {rtt_ms:6.1f}ms | "
@@ -180,7 +184,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                     stats["count"] += 1
                     
             else:
-                print(f"[{worker_id:03d}-F{frame_index:02d}] [SERVER_ERR] {data.get('message', 'Unknown Error')}")
+                print(f"[{worker_id:03d}-F{frame_index:04d}] [SERVER_ERR] {data.get('message', 'Unknown Error')}")
                 
     except Exception as e:
         print(f"[{worker_id:03d}] [PIPE_BREAK] Pipeline exception encountered: {e}")
@@ -231,11 +235,12 @@ def main():
 
     os.makedirs(args.input, exist_ok=True)
     video_extensions = (".mp4", ".avi", ".mov", ".mkv")
-    videos = [
+    # Sort the files alphabetically so the sequence is predictable
+    videos = sorted([
         os.path.join(args.input, f)
         for f in os.listdir(args.input)
         if f.lower().endswith(video_extensions)
-    ]
+    ])
 
     if not videos:
         print(f"ERROR: No source video files found inside target dir: {args.input}")
@@ -255,7 +260,8 @@ def main():
     start_sim = time.perf_counter()
 
     for i in range(1, num_sessions + 1):
-        chosen_video = random.choice(videos)
+        # LOOPING THROUGH FILE DIRECTORY PREDICTABLY (Wrapping around via modulo)
+        chosen_video = videos[(i - 1) % len(videos)]
         executor.submit(
             stream_video_pipeline,
             i,
@@ -263,7 +269,7 @@ def main():
             ws_url,
             log_filename,
             target_size_mode,
-            max_frames=30
+            max_frames=None  # Explicitly set to None to process ALL frames in the video file
         )
 
     executor.shutdown(wait=True)
