@@ -84,7 +84,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
     
     try:
         while cap.isOpened():
-            # If max_frames is set and we've reached it, break out
+            # --- FIXED CRITICAL CHECK ---
             if max_frames is not None and frame_index >= max_frames:
                 break
 
@@ -250,8 +250,6 @@ def main():
         print(f"ERROR: No source video files found inside target dir: {args.input}")
         return
 
-    # === RANDOMIZE ORDER PER RUN ===
-    # Shuffling changes the index layout while ensuring modulo sequence grabs a unique video every time.
     random.shuffle(videos)
 
     with open(log_filename, "w") as f:
@@ -268,7 +266,6 @@ def main():
     start_sim = time.perf_counter()
 
     for i in range(1, num_sessions + 1):
-        # Grabs from the shuffled sequence layout seamlessly without duplications where possible
         chosen_video = videos[(i - 1) % len(videos)]
         executor.submit(
             stream_video_pipeline,
@@ -277,7 +274,7 @@ def main():
             ws_url,
             log_filename,
             target_size_mode,
-            max_frames=100
+            max_frames=30  # Change 30 to any upper limit you want per video
         )
 
     executor.shutdown(wait=True)
