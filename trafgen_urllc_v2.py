@@ -92,20 +92,28 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                 
             frame_index += 1
             
-            # ==============================================================================
-            # AUTHENTIC VARIANCE ENGINE: Dynamic Resolution Matrix Selection
-            # ==============================================================================
-            # Completely zero sleep here. The code pushes raw matrices continuously.
-            resolutions = [(160, 160), (320, 320), (416, 416), (640, 640)]
-            chosen_res = random.choice(resolutions)
-            resized_frame = cv2.resize(frame, chosen_res, interpolation=cv2.INTER_AREA)
-            # ==============================================================================
-            
+            # Resolve chosen KB configuration mode first
             if target_size_mode == "random":
                 chosen_kb = random.randint(1, 5)
             else:
                 chosen_kb = int(target_size_mode)
-                
+            
+            # ==============================================================================
+            # AUTHENTIC VARIANCE ENGINE: Dynamic Resolution Balanced by Size Ceilings
+            # ==============================================================================
+            # Automatically scales resolution boundaries down if small KB limits are targeted.
+            # This protects your 1KB/2KB rules from failing due to physical JPEG header overhead.
+            if chosen_kb == 1:
+                resolutions = [(120, 120), (160, 160)]
+            elif chosen_kb == 2:
+                resolutions = [(160, 160), (240, 240), (320, 320)]
+            else:
+                resolutions = [(160, 160), (320, 320), (416, 416), (640, 640)]
+
+            chosen_res = random.choice(resolutions)
+            resized_frame = cv2.resize(frame, chosen_res, interpolation=cv2.INTER_AREA)
+            # ==============================================================================
+            
             strict_max_bytes = chosen_kb * 1024
             binary_bytes = b""
             byte_size = 0
@@ -113,6 +121,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
             low_q, high_q = 1, 100
             best_quality = 50
             
+            # Binary search compression engine
             for attempt in range(6):  
                 mid_q = (low_q + high_q) // 2
                 _, encoded_img = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
@@ -127,12 +136,13 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                 else:
                     high_q = mid_q - 1
             
+            # Absolute fallback mechanism if target is still too restrictive
             if not binary_bytes:
                 _, encoded_img = cv2.imencode('.jpg', resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
                 binary_bytes = encoded_img.tobytes()
                 byte_size = len(binary_bytes)
             
-            # Immediate, high-throughput transmission loop
+            # Push payload immediately down the persistent pipeline
             start_rtt = time.perf_counter()
             ws.send_binary(binary_bytes)
             response_raw = ws.recv()
@@ -153,7 +163,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, target_si
                 
                 log_entry = (
                     f"[{worker_id:03d}-F{frame_index:04d}] [OK] {filename[:12]:<12} | "
-                    f"Res: {chosen_res[0]}x{chosen_res[1]} | "
+                    f"Res: {chosen_res[0]:>3}x{chosen_res[1]:<3} | "
                     f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB) | "
                     f"RTT: {rtt_ms:6.1f}ms | "
                     f"Server_AI: {ai_ms:5.1f}ms | "
@@ -199,6 +209,7 @@ def main():
     print(f"Binding to interface : {args.interface}")
     print(f"Source IP            : {source_ip}")
 
+    # --- THREE INTERACTIVE PROMPTS ---
     try:
         num_sessions = int(input("\nTotal stream sessions to run       : "))
         
@@ -236,6 +247,7 @@ def main():
         print(f"ERROR: No source video files found inside target dir: {args.input}")
         return
 
+    # Randomize list layout to ensure varied structural order per execution run
     random.shuffle(videos)
 
     with open(log_filename, "w") as f:
