@@ -10,6 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 import websocket  # pip install websocket-client
+import json
 
 # ============================================================
 # GLOBAL STATISTICS
@@ -65,7 +66,7 @@ def patch_socket_source_ip(source_ip):
 # ============================================================
 # STREAMING PIPELINE WORKER FUNCTION
 # ============================================================
-def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frames=None):
+def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_kb, size_max_kb, max_frames=None):
     filename = os.path.basename(video_path)
     cap = cv2.VideoCapture(video_path)
     
@@ -92,10 +93,36 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
                 
             frame_index += 1
             
-            # Use original frame size and encode at maximum quality (No compression)
-            _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
-            binary_bytes = encoded_img.tobytes()
-            byte_size = len(binary_bytes)
+            # Select target size boundary dynamically for this specific frame
+            target_kb = random.randint(size_min_kb, size_max_kb)
+            strict_max_bytes = target_kb * 1024
+            
+            binary_bytes = b""
+            byte_size = 0
+            
+            low_q, high_q = 1, 100
+            best_quality = 100
+            
+            # Smart-scale loop: Attempt to keep quality as high as possible while honoring KB limit
+            for attempt in range(6):  
+                mid_q = (low_q + high_q) // 2
+                _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
+                temp_bytes = encoded_img.tobytes()
+                temp_size = len(temp_bytes)
+                
+                if temp_size <= strict_max_bytes:
+                    best_quality = mid_q
+                    binary_bytes = temp_bytes
+                    byte_size = temp_size
+                    low_q = mid_q + 1
+                else:
+                    high_q = mid_q - 1
+            
+            # Emergency fallback: If frame is still physically too large for constraint, enforce absolute minimum quality
+            if not binary_bytes:
+                _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
+                binary_bytes = encoded_img.tobytes()
+                byte_size = len(binary_bytes)
             
             # Push payload immediately down the persistent pipeline
             start_rtt = time.perf_counter()
@@ -106,7 +133,6 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
             rtt_ms = (end_rtt - start_rtt) * 1000
             
             try:
-                import json
                 data = json.loads(response_raw)
             except Exception:
                 data = {}
@@ -114,16 +140,18 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, max_frame
             if data.get("status") == "success":
                 ai_ms = data.get("inference_time_ms", 0.0)
                 network_transit_ms = max(0.0, rtt_ms - ai_ms)
+                detected_objects = data.get("detected", [])
                 
                 h, w = frame.shape[:2]
                 
                 log_entry = (
                     f"[{worker_id:03d}-F{frame_index:04d}] [OK] {filename[:12]:<12} | "
                     f"Res: {w:>3}x{h:<3} | "
-                    f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB) | "
+                    f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB / Target Max: {target_kb} KB) | "
                     f"RTT: {rtt_ms:6.1f}ms | "
                     f"Server_AI: {ai_ms:5.1f}ms | "
-                    f"Net_Transit: {network_transit_ms:6.1f}ms"
+                    f"Net_Transit: {network_transit_ms:6.1f}ms | "
+                    f"Detected: {detected_objects}"
                 )
                 print(log_entry)
                 
@@ -168,13 +196,27 @@ def main():
     # --- RUNTIME CONFIGURATION PROMPTS ---
     try:
         num_sessions = int(input("\nTotal stream sessions to run       : "))
-        log_input = input("Log file name (.txt)               : ") or "nanodet_websocket_log.txt"
+        
+        # Accept explicit sizes or numeric range windows (e.g. 2, 5, 2-8, 1-5)
+        size_input = input("Enter size limit in KB (e.g., 5 or 2-8) : ").strip()
+        if "-" in size_input:
+            parts = size_input.split("-")
+            size_min_kb = int(parts[0].strip())
+            size_max_kb = int(parts[1].strip())
+        else:
+            size_min_kb = int(size_input)
+            size_max_kb = size_min_kb
+            
+        if size_min_kb <= 0 or size_max_kb < size_min_kb:
+            raise ValueError
+
+        log_input = input("\nLog file name (.txt)               : ") or "nanodet_websocket_log.txt"
         
         log_dir = "../logs" 
         os.makedirs(log_dir, exist_ok=True) 
         log_filename = os.path.join(log_dir, log_input)
     except ValueError:
-        print("ERROR: Invalid input configuration received.")
+        print("ERROR: Invalid input configuration or size range window entered.")
         return
 
     ws_url = f"ws://{args.host}:{args.port}{args.endpoint}"
@@ -193,14 +235,13 @@ def main():
         print(f"ERROR: No source video files found inside target dir: {args.input}")
         return
 
-    # Randomize layout to ensure mixed structural streaming order across workers
     random.shuffle(videos)
 
     with open(log_filename, "w") as f:
         f.write(f"=== URLLC REAL-TIME NANODET WEBSOCKET TEST LOG ===\n")
         f.write(f"Timestamp   : {time.ctime()}\nServer      : {ws_url}\nInterface   : {args.interface}\n")
-        f.write(f"Size Mode   : Raw Native Capture (No Compression)\n\n")
-        f.write("-" * 130 + "\n")
+        f.write(f"Size Range  : {size_min_kb} KB to {size_max_kb} KB\n\n")
+        f.write("-" * 150 + "\n")
 
     patch_socket_source_ip(source_ip)
 
@@ -217,6 +258,8 @@ def main():
             chosen_video,
             ws_url,
             log_filename,
+            size_min_kb,
+            size_max_kb,
             max_frames=30  
         )
 
