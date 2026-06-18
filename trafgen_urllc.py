@@ -225,19 +225,29 @@ def main():
             print("ERROR: Invalid selection. Choose 1-5 or 'random'.")
             return
 
-        log_input = input("\nLog file name (.txt)               : ") or "nanodet_websocket_log.txt"
-        # Define your target directory here (e.g., a folder named 'logs' in the current directory)
-        log_dir = "../logs" 
-        os.makedirs(log_dir, exist_ok=True) # Automatically creates the folder if it doesn't exist
+        log_input = input("\nLog file base name (.txt)          : ").strip() or "nanodet_websocket_log"
         
-        # Combine the directory and the filename safely
-        log_filename = os.path.join(log_dir, log_input)
+        # Clean off explicit extension trailing inputs to ensure clean timestamping format
+        if log_input.lower().endswith(".txt"):
+            log_input = log_input[:-4]
+            
+        # Generate dynamic variation timestamp (Format: YYYYMMDD_HHMMSS)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        
+        # Define target directory and force-verify its architecture exists
+        log_dir = "../logs" 
+        os.makedirs(log_dir, exist_ok=True) 
+        
+        # Build completely distinct variations safe from manual overlaps
+        log_filename = os.path.join(log_dir, f"{log_input}_{timestamp}.txt")
+        
     except ValueError:
         print("ERROR: Invalid input configuration received.")
         return
 
     ws_url = f"ws://{args.host}:{args.port}{args.endpoint}"
     print(f"Server WebSocket URL : {ws_url}")
+    print(f"Active Log Out File  : {log_filename}")
 
     os.makedirs(args.input, exist_ok=True)
     video_extensions = (".mp4", ".avi", ".mov", ".mkv")
