@@ -225,33 +225,21 @@ def main():
             print("ERROR: Invalid selection. Choose 1-5 or 'random'.")
             return
 
-        log_input = input("\nLog file base name (.txt)          : ").strip() or "nanodet_websocket_log"
-        
-        # Clean off explicit extension trailing inputs to ensure clean timestamping format
-        if log_input.lower().endswith(".txt"):
-            log_input = log_input[:-4]
-            
-        # Generate dynamic variation timestamp (Format: YYYYMMDD_HHMMSS)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        
-        # Define target directory and force-verify its architecture exists
+        log_input = input("\nLog file name (.txt)               : ") or "nanodet_websocket_log.txt"
         log_dir = "../logs" 
         os.makedirs(log_dir, exist_ok=True) 
         
-        # Build completely distinct variations safe from manual overlaps
-        log_filename = os.path.join(log_dir, f"{log_input}_{timestamp}.txt")
-        
+        log_filename = os.path.join(log_dir, log_input)
     except ValueError:
         print("ERROR: Invalid input configuration received.")
         return
 
     ws_url = f"ws://{args.host}:{args.port}{args.endpoint}"
     print(f"Server WebSocket URL : {ws_url}")
-    print(f"Active Log Out File  : {log_filename}")
 
     os.makedirs(args.input, exist_ok=True)
     video_extensions = (".mp4", ".avi", ".mov", ".mkv")
-    # Sort the files alphabetically so the sequence is predictable
+    
     videos = sorted([
         os.path.join(args.input, f)
         for f in os.listdir(args.input)
@@ -261,6 +249,10 @@ def main():
     if not videos:
         print(f"ERROR: No source video files found inside target dir: {args.input}")
         return
+
+    # === RANDOMIZE ORDER PER RUN ===
+    # Shuffling changes the index layout while ensuring modulo sequence grabs a unique video every time.
+    random.shuffle(videos)
 
     with open(log_filename, "w") as f:
         f.write(f"=== URLLC REAL-TIME NANODET WEBSOCKET TEST LOG ===\n")
@@ -276,7 +268,7 @@ def main():
     start_sim = time.perf_counter()
 
     for i in range(1, num_sessions + 1):
-        # LOOPING THROUGH FILE DIRECTORY PREDICTABLY (Wrapping around via modulo)
+        # Grabs from the shuffled sequence layout seamlessly without duplications where possible
         chosen_video = videos[(i - 1) % len(videos)]
         executor.submit(
             stream_video_pipeline,
@@ -285,7 +277,7 @@ def main():
             ws_url,
             log_filename,
             target_size_mode,
-            max_frames=None  # Explicitly set to None to process ALL frames in the video file
+            max_frames=None  
         )
 
     executor.shutdown(wait=True)
