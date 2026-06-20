@@ -36,7 +36,7 @@ def parse_arguments():
     parser.add_argument("--port", "-p", default="80") 
     parser.add_argument("--endpoint", "-e", default="/stream/yolo") 
     parser.add_argument("--interface", "-i", default="oaitun_ue1")
-    parser.add_argument("--input", default="../input_video", help="Folder containing input videos")
+    parser.add_argument("--input", default="../input_videos", help="Folder containing input videos")
     parser.add_argument("--workers", "-w", type=int, default=1, help="Maximum concurrent streaming pipelines")
     return parser.parse_args()
 
