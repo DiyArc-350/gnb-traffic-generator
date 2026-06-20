@@ -36,7 +36,7 @@ def parse_arguments():
     parser.add_argument("--port", "-p", default="80") 
     parser.add_argument("--endpoint", "-e", default="/stream/yolo") 
     parser.add_argument("--interface", "-i", default="oaitun_ue1")
-    parser.add_argument("--input", default="../input_videos", help="Folder containing input videos")
+    parser.add_argument("--input", default="../input_video", help="Folder containing input videos")
     parser.add_argument("--workers", "-w", type=int, default=1, help="Maximum concurrent streaming pipelines")
     return parser.parse_args()
 
@@ -93,18 +93,19 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 
             frame_index += 1
             
-            # --- LOCAL COMPRESSION ENGINE ---
-            # Kept entirely outside the network timing window
             target_kb = random.randint(size_min_kb, size_max_kb)
             strict_max_bytes = target_kb * 1024
             
+            current_frame = frame.copy()
             binary_bytes = b""
             byte_size = 0
-            low_q, high_q = 1, 100
             
+            # --- ADVANCED DYNAMIC SIZE ENGINE ---
+            # Step A: Attempt Quality Tuning on Current Resolution
+            low_q, high_q = 1, 100
             for attempt in range(6):  
                 mid_q = (low_q + high_q) // 2
-                _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
+                _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
                 temp_bytes = encoded_img.tobytes()
                 temp_size = len(temp_bytes)
                 
@@ -115,8 +116,33 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 else:
                     high_q = mid_q - 1
             
+            # Step B: Resolution Fallback Loop (If Quality tuning couldn't bypass the 4K file structural floor)
+            scale_factor = 0.75
+            while (not binary_bytes or byte_size > strict_max_bytes) and scale_factor > 0.05:
+                h, w = frame.shape[:2]
+                new_w = int(w * scale_factor)
+                new_h = int(h * scale_factor)
+                
+                # Prevent crashing on microscopic resolutions
+                if new_w < 40 or new_h < 40:
+                    break
+                    
+                current_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
+                # Test compression again at minimum quality on the new downscaled canvas
+                _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, 5])
+                temp_bytes = encoded_img.tobytes()
+                
+                if len(temp_bytes) <= strict_max_bytes:
+                    binary_bytes = temp_bytes
+                    byte_size = len(temp_bytes)
+                    break
+                    
+                scale_factor -= 0.15 # Iteratively downscale further if still too heavy
+                
+            # Final fallback safeguard
             if not binary_bytes:
-                _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
+                _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
                 binary_bytes = encoded_img.tobytes()
                 byte_size = len(binary_bytes)
             
@@ -138,16 +164,14 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 
             if data.get("status") == "success":
                 ai_ms = data.get("inference_time_ms", 0.0)
-                
-                # Pure network transit time without local processing overhead
                 network_transit_ms = max(0.0, rtt_ms - ai_ms)
                 detected_objects = data.get("detected", [])
                 
-                h, w = frame.shape[:2]
+                h_active, w_active = current_frame.shape[:2]
                 
                 log_entry = (
                     f"[{worker_id:03d}-F{frame_index:04d}] [OK] {filename[:12]:<12} | "
-                    f"Res: {w:>3}x{h:<3} | "
+                    f"Res: {w_active:>3}x{h_active:<3} | "
                     f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB / Target Max: {target_kb} KB) | "
                     f"RTT: {rtt_ms:6.1f}ms | "
                     f"Server_AI: {ai_ms:5.1f}ms | "
