@@ -93,42 +93,66 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 
             frame_index += 1
             
-            # 1. Choose dynamic target ceiling for this frame
+            # --- LOCAL ADAPTIVE COMPRESSION ENGINE ---
             target_kb = random.randint(size_min_kb, size_max_kb)
             strict_max_bytes = target_kb * 1024
             
+            current_frame = frame.copy()
             binary_bytes = b""
             byte_size = 0
             
+            # Step A: Optimize JPEG Quality via Binary Search on Native Resolution
             low_q, high_q = 1, 100
-            best_quality = 100
-            
-            # 2. RUN BINARY COMPRESSION ENGINE ON ORIGINAL RESOLUTION
             for attempt in range(6):  
                 mid_q = (low_q + high_q) // 2
-                _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
+                _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
                 temp_bytes = encoded_img.tobytes()
                 temp_size = len(temp_bytes)
                 
                 if temp_size <= strict_max_bytes:
-                    best_quality = mid_q
                     binary_bytes = temp_bytes
                     byte_size = temp_size
                     low_q = mid_q + 1
                 else:
                     high_q = mid_q - 1
             
-            # Emergency fallback rule
+            # Step B: Dynamic Multi-Step Dimensional Downscaling Fallback
+            # Progressively shrinks the frame array from its CURRENT size if headers exceed ceiling
+            while (not binary_bytes or byte_size > strict_max_bytes):
+                h, w = current_frame.shape[:2]
+                
+                if w < 80 or h < 80:
+                    break
+                
+                new_w = int(w * 0.70)
+                new_h = int(h * 0.70)
+                current_frame = cv2.resize(current_frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
+                _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, 15])
+                temp_bytes = encoded_img.tobytes()
+                temp_size = len(temp_bytes)
+                
+                if temp_size <= strict_max_bytes:
+                    binary_bytes = temp_bytes
+                    byte_size = temp_size
+                    break
+                else:
+                    byte_size = temp_size
+                
+            # Final fallback rule if strict limits are exceptionally low
             if not binary_bytes:
-                _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
+                _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
                 binary_bytes = encoded_img.tobytes()
                 byte_size = len(binary_bytes)
             
-            # Push payload immediately down the persistent pipeline
+            # ==============================================================================
+            # ISOLATED HIGH-PRECISION NETWORK TIMING WINDOW
+            # ==============================================================================
             start_rtt = time.perf_counter()
             ws.send_binary(binary_bytes)
             response_raw = ws.recv()
             end_rtt = time.perf_counter()
+            # ==============================================================================
             
             rtt_ms = (end_rtt - start_rtt) * 1000
             
@@ -142,11 +166,11 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 network_transit_ms = max(0.0, rtt_ms - ai_ms)
                 detected_objects = data.get("detected", [])
                 
-                h, w = frame.shape[:2]
+                h_active, w_active = current_frame.shape[:2]
                 
                 log_entry = (
                     f"[{worker_id:03d}-F{frame_index:04d}] [OK] {filename[:12]:<12} | "
-                    f"Res: {w:>3}x{h:<3} | "
+                    f"Res: {w_active:>3}x{h_active:<3} | "
                     f"Payload: {byte_size:,} Bytes ({byte_size/1024:4.2f} KB / Target Max: {target_kb} KB) | "
                     f"RTT: {rtt_ms:6.1f}ms | "
                     f"Server_AI: {ai_ms:5.1f}ms | "
