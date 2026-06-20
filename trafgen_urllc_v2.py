@@ -93,7 +93,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 
             frame_index += 1
             
-            # Select target size boundary dynamically for this specific frame
+            # 1. Choose dynamic target ceiling for this frame
             target_kb = random.randint(size_min_kb, size_max_kb)
             strict_max_bytes = target_kb * 1024
             
@@ -103,7 +103,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
             low_q, high_q = 1, 100
             best_quality = 100
             
-            # Smart-scale loop: Attempt to keep quality as high as possible while honoring KB limit
+            # 2. RUN BINARY COMPRESSION ENGINE ON ORIGINAL RESOLUTION
             for attempt in range(6):  
                 mid_q = (low_q + high_q) // 2
                 _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, mid_q])
@@ -118,7 +118,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 else:
                     high_q = mid_q - 1
             
-            # Emergency fallback: If frame is still physically too large for constraint, enforce absolute minimum quality
+            # Emergency fallback rule
             if not binary_bytes:
                 _, encoded_img = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 1])
                 binary_bytes = encoded_img.tobytes()
@@ -197,8 +197,7 @@ def main():
     try:
         num_sessions = int(input("\nTotal stream sessions to run       : "))
         
-        # Accept explicit sizes or numeric range windows (e.g. 2, 5, 2-8, 1-5)
-        size_input = input("Enter size limit in KB (e.g., 5 or 2-8) : ").strip()
+        size_input = input("Enter size limit range in KB (e.g., 5 or 2-8) : ").strip()
         if "-" in size_input:
             parts = size_input.split("-")
             size_min_kb = int(parts[0].strip())
