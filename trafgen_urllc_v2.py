@@ -117,7 +117,6 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                     high_q = mid_q - 1
             
             # Step B: Dynamic Multi-Step Dimensional Downscaling Fallback
-            # Progressively shrinks the frame array from its CURRENT size if headers exceed ceiling
             while (not binary_bytes or byte_size > strict_max_bytes):
                 h, w = current_frame.shape[:2]
                 
@@ -145,6 +144,13 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 binary_bytes = encoded_img.tobytes()
                 byte_size = len(binary_bytes)
             
+            # --- DETERMINISTIC ZERO-PADDING TO EXACT INPUT TARGET ---
+            # Ensures the transmitted binary block is never under the requested size boundary
+            if byte_size < strict_max_bytes:
+                padding_bytes_needed = strict_max_bytes - byte_size
+                binary_bytes += b'\x00' * padding_bytes_needed
+                byte_size = len(binary_bytes)
+
             # ==============================================================================
             # ISOLATED HIGH-PRECISION NETWORK TIMING WINDOW
             # ==============================================================================

@@ -116,20 +116,18 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 else:
                     high_q = mid_q - 1
             
-            # Step B: Resolution Fallback Loop (If Quality tuning couldn't bypass the 4K file structural floor)
+            # Step B: Resolution Fallback Loop (If Quality tuning couldn't bypass structural floor)
             scale_factor = 0.75
             while (not binary_bytes or byte_size > strict_max_bytes) and scale_factor > 0.05:
                 h, w = frame.shape[:2]
                 new_w = int(w * scale_factor)
                 new_h = int(h * scale_factor)
                 
-                # Prevent crashing on microscopic resolutions
                 if new_w < 40 or new_h < 40:
                     break
                     
                 current_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 
-                # Test compression again at minimum quality on the new downscaled canvas
                 _, encoded_img = cv2.imencode('.jpg', current_frame, [cv2.IMWRITE_JPEG_QUALITY, 5])
                 temp_bytes = encoded_img.tobytes()
                 
@@ -138,7 +136,7 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                     byte_size = len(temp_bytes)
                     break
                     
-                scale_factor -= 0.15 # Iteratively downscale further if still too heavy
+                scale_factor -= 0.15 
                 
             # Final fallback safeguard
             if not binary_bytes:
@@ -146,6 +144,13 @@ def stream_video_pipeline(worker_id, video_path, ws_url, log_filename, size_min_
                 binary_bytes = encoded_img.tobytes()
                 byte_size = len(binary_bytes)
             
+            # --- EXACT TARGET CEILING PADDING ---
+            # If compressed image is lighter than the target, pad up to the EXACT requested size
+            if byte_size < strict_max_bytes:
+                padding_needed = strict_max_bytes - byte_size
+                binary_bytes += b'\x00' * padding_needed
+                byte_size = len(binary_bytes)
+
             # ==============================================================================
             # ISOLATED HIGH-PRECISION NETWORK TIMING WINDOW
             # ==============================================================================
